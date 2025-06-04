@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WA Test</title>
+  <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+  <style>
+    img.qr {
+      width: 300px;
+      margin-top: 10px;
+      border: 2px solid #333;
+    }
+    label {
+      display: block;
+      margin: 10px 0;
+    }
+    #status-display {
+      font-size: 1.2em;
+      font-weight: bold;
+      margin-bottom: 10px;
+    }
+  </style>
+</head>
+<body>
+  <h1>WhatsApp Bot Test</h1>
+
+  <div id="status-display">📶 Status: Unknown</div> <!-- Live status shown here -->
+
+  <label>
+    <input type="checkbox" id="force-delete-checkbox" />
+    Force delete session (fresh connection)
+  </label>
+
+  <button onclick="initSession()">Create Session</button>
+
+  <div id="qr-container"></div>
+  <pre id="log"></pre>
+
+  <script>
+    const userId = 'user123';
+    const socket = io("http://localhost:8000", {
+      query: { userId }
+    });
+
+    function initSession() {
+      const forceDelete = document.getElementById('force-delete-checkbox').checked;
+      console.log("🟢 Triggering session start for:", userId, "forceDelete:", forceDelete);
+      document.getElementById('log').textContent += `\n🟢 Triggered session for: ${userId} | forceDelete: ${forceDelete}`;
+      socket.emit('init-session', { userId, forceDelete });
+    }
+
+    socket.on("connect", () => {
+        document.getElementById('log').textContent += "\n✅ Connected to socket!";
+        socket.emit("get-status"); // 🔄 Request current status on connect
+    });
+
+
+    socket.on('qr', (base64QR) => {
+      document.getElementById('log').textContent += "\n📸 QR received!";
+      const qrContainer = document.getElementById('qr-container');
+      qrContainer.innerHTML = '';
+      const img = new Image();
+      img.src = base64QR;
+      img.alt = "Scan QR Code";
+      img.className = "qr";
+      qrContainer.appendChild(img);
+    });
+
+    socket.on('message', (msg) => {
+      document.getElementById('log').textContent += `\n💬 ${msg.group || 'Private'} | ${msg.from}: ${msg.body}`;
+    });
+
+    socket.on('session-error', (err) => {
+      document.getElementById('log').textContent += `\n❌ Error: ${err}`;
+    });
+
+    socket.on('status', (status) => {
+    document.getElementById('status-display').textContent = `📶 Status: ${status}`;
+    });
+
+  </script>
+</body>
+</html>
