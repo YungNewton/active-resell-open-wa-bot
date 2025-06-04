@@ -3,26 +3,29 @@ import { Server } from 'socket.io';
 import path from 'path';
 import fs from 'fs-extra';
 
+// In-memory store of active clients
 const clients: Record<string, Client> = {};
 let ioInstance: Server;
 
-// 🔄 Global QR listener
+/**
+ * Global QR event listener: Emits QR to correct socket room
+ */
 ev.on('**', (data, sessionId, namespace) => {
   if (namespace === 'qr') {
-    console.log(`🟡 [EV QR NAMESPACE] triggered for ${sessionId}`);
     ioInstance?.to(sessionId).emit('qr', data);
   }
 });
 
+/**
+ * Returns current connection state of a WhatsApp session
+ */
 export async function getClientState(userId: string): Promise<string | null> {
   const client = clients[userId];
   if (!client) return null;
 
   try {
-    const state = await client.getConnectionState();
-    return state; // e.g., 'CONNECTED', 'UNPAIRED', etc.
+    return await client.getConnectionState();
   } catch (error) {
-    console.error(`❌ Failed to get connection state for ${userId}:`, error);
     return null;
   }
 }
@@ -40,39 +43,26 @@ export async function initClient(
   forceDelete = false
 ): Promise<void> {
   ioInstance = io;
-
   const sessionPath = path.resolve(__dirname, '..', 'sessions', userId);
-  console.log(`\n=== [initClient called for ${userId}] ===`);
 
+  // Cleanup if forced
   if (forceDelete) {
-    try {
-      console.log(`🧨 forceDelete=true: Cleaning up session folder for ${userId}...`);
-      await fs.remove(sessionPath);
-      delete clients[userId];
-      console.log(`✅ Deleted session folder for ${userId}`);
-    } catch (err) {
-      console.error(`❌ Failed to delete session folder for ${userId}:`, err);
-    }
+    await fs.remove(sessionPath).catch(() => {});
+    delete clients[userId];
   }
 
+  // Reuse client if already connected
   const existingClient = clients[userId];
   if (existingClient) {
     try {
       const state = await existingClient.getConnectionState();
-      console.log(`ℹ️ Existing client state for ${userId}: ${state}`);
-
-      if (state === 'CONNECTED') {
-        console.log(`✅ Client already connected for ${userId}. Skipping reinit.`);
-        return;
-      }
-    } catch (err) {
-      console.warn(`⚠️ Could not get connection state for ${userId}. Proceeding with reinit.`);
+      if (state === 'CONNECTED') return;
+    } catch (_) {
+      // Continue to reinit
     }
   }
 
   try {
-    console.log(`🚀 Attempting to create client for ${userId}...`);
-
     const client = await create({
       sessionId: userId,
       multiDevice: true,
@@ -85,22 +75,19 @@ export async function initClient(
       sessionDataPath: sessionPath,
     });
 
-    console.log(`✅ Client successfully created for ${userId}`);
     clients[userId] = client;
 
+    // State change listener
     client.onStateChanged((state) => {
-      console.log(`📶 [onStateChanged] ${userId}: ${state}`);
-      io.to(userId).emit('status', state);
-
+      io.to(userId).emit('status', { id: userId, status: state });
       if (['CONFLICT', 'UNPAIRED', 'UNLAUNCHED'].includes(state)) {
-        console.warn(`⚠️ Bad state ${state} for ${userId}, cleaning up client.`);
         delete clients[userId];
       }
     });
 
+    // Group message listener
     client.onMessage(async (msg) => {
       if (msg.isGroupMsg) {
-        console.log(`💬 Group message received from ${msg.sender?.pushname}`);
         io.to(userId).emit('message', {
           group: msg.chat?.name || 'Unnamed Group',
           from: msg.sender?.pushname || msg.sender?.formattedName || 'Unknown',
@@ -111,10 +98,7 @@ export async function initClient(
         });
       }
     });
-
-    console.log(`✅ WhatsApp client fully initialized for user ${userId}`);
   } catch (error) {
-    console.error(`❌ [initClient ERROR] Failed for ${userId}:`, error);
     io.to(userId).emit('error', 'Failed to start WhatsApp session');
   }
 }
