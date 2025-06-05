@@ -1,23 +1,63 @@
-import { create, Client, ev } from '@open-wa/wa-automate';
-import { Server } from 'socket.io';
+// === controllers/clientManager.ts ===
 import path from 'path';
 import fs from 'fs-extra';
+import { create, Client, ev } from '@open-wa/wa-automate';
+import axios from 'axios';
+import dotenv from 'dotenv';
+import { registeredGroups } from '../utils/state';
 
-// In-memory store of active clients
-const clients: Record<string, Client> = {};
-let ioInstance: Server;
+dotenv.config(); // Load .env
 
-/**
- * Global QR event listener: Emits QR to correct socket room
- */
-ev.on('**', (data, sessionId, namespace) => {
+const BACKEND_BASE_URL = process.env.BACKEND_BASE_URL || 'http://localhost:4000';
+export const clients: Record<string, Client> = {};
+
+// Global event listener — required once
+ev.on('**', async (data, sessionId, namespace) => {
+  if (!sessionId) return;
+
   if (namespace === 'qr') {
-    ioInstance?.to(sessionId).emit('qr', data);
+    console.log(`🟡 QR code ready for ${sessionId}`);
+    try {
+      await axios.post(`${BACKEND_BASE_URL}/wa/qr-code/`, {
+        user_id: sessionId,
+        qr_base64: data,
+      });
+    } catch (err) {
+      if (err instanceof Error) {
+        console.error(`❌ Failed to send QR to Django for ${sessionId}:`, err.message);
+      } else {
+        console.error(`❌ Unknown QR error for ${sessionId}:`, err);
+      }
+    }
+  }
+
+  if (namespace === 'sessionData') {
+    console.log(`📦 Session data updated for ${sessionId}`);
+  }
+
+  if (namespace === 'state') {
+    console.log(`🔁 Global state change for ${sessionId}: ${data}`);
+    try {
+      await axios.post(`${BACKEND_BASE_URL}/wa/session-status/`, {
+        user_id: sessionId,
+        status: data,
+      });
+    } catch (err) {
+      if (err instanceof Error) {
+        console.error(`❌ Failed to send global state for ${sessionId}:`, err.message);
+      } else {
+        console.error(`❌ Unknown global state error for ${sessionId}:`, err);
+      }
+    }
+  }
+
+  if (namespace === 'error') {
+    console.error(`❗ Error from ${sessionId}: ${data}`);
   }
 });
 
 /**
- * Returns current connection state of a WhatsApp session
+ * Returns the current connection state of a WhatsApp client
  */
 export async function getClientState(userId: string): Promise<string | null> {
   const client = clients[userId];
@@ -25,80 +65,88 @@ export async function getClientState(userId: string): Promise<string | null> {
 
   try {
     return await client.getConnectionState();
-  } catch (error) {
+  } catch (_) {
     return null;
   }
 }
 
 /**
- * Initialize a new WhatsApp client.
- * @param userId The session ID (unique per user)
- * @param io Socket.IO server instance
- * @param forceDelete If true, deletes existing session data for a fresh login
+ * Initializes a WhatsApp session and returns QR code if needed
  */
-
-export async function initClient(
-  userId: string,
-  io: Server,
-  forceDelete = false
-): Promise<void> {
-  ioInstance = io;
+export async function initClient(userId: string, forceDelete = false): Promise<string> {
   const sessionPath = path.resolve(__dirname, '..', 'sessions', userId);
+  let qrCodeData: string | null = null;
 
-  // Cleanup if forced
   if (forceDelete) {
     await fs.remove(sessionPath).catch(() => {});
     delete clients[userId];
   }
 
-  // Reuse client if already connected
-  const existingClient = clients[userId];
-  if (existingClient) {
-    try {
-      const state = await existingClient.getConnectionState();
-      if (state === 'CONNECTED') return;
-    } catch (_) {
-      // Continue to reinit
+  if (clients[userId]) {
+    const state = await getClientState(userId);
+    if (state === 'CONNECTED') {
+      console.log(`🟢 Client for ${userId} already connected`);
+      return '';
     }
   }
 
-  try {
-    const client = await create({
-      sessionId: userId,
-      multiDevice: true,
-      qrTimeout: 0,
-      authTimeout: 60,
-      headless: true,
-      killProcessOnBrowserClose: true,
-      useChrome: true,
-      executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      sessionDataPath: sessionPath,
-    });
+  const client = await create({
+    sessionId: userId,
+    multiDevice: true,
+    qrTimeout: 0,
+    authTimeout: 60,
+    headless: true,
+    killProcessOnBrowserClose: true,
+    executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    sessionDataPath: sessionPath,
+  });
 
-    clients[userId] = client;
+  clients[userId] = client;
 
-    // State change listener
-    client.onStateChanged((state) => {
-      io.to(userId).emit('status', { id: userId, status: state });
-      if (['CONFLICT', 'UNPAIRED', 'UNLAUNCHED'].includes(state)) {
-        delete clients[userId];
+  client.onStateChanged(async (state) => {
+    console.log(`🔁 [Client-level] State changed for ${userId}: ${state}`);
+
+    try {
+      await axios.post(`${BACKEND_BASE_URL}/wa/session-status/`, {
+        user_id: userId,
+        status: state,
+      });
+    } catch (err) {
+      if (err instanceof Error) {
+        console.error(`❌ Failed to send client-level state for ${userId}:`, err.message);
+      } else {
+        console.error(`❌ Unknown client state error for ${userId}:`, err);
       }
-    });
+    }
 
-    // Group message listener
-    client.onMessage(async (msg) => {
-      if (msg.isGroupMsg) {
-        io.to(userId).emit('message', {
-          group: msg.chat?.name || 'Unnamed Group',
-          from: msg.sender?.pushname || msg.sender?.formattedName || 'Unknown',
-          body: msg.body,
-          timestamp: msg.timestamp,
-          hasMedia: !!msg.mimetype,
-          mediaType: msg.type,
-        });
+    if (["CONFLICT", "UNPAIRED", "UNLAUNCHED"].includes(state)) {
+      delete clients[userId];
+    }
+  });
+
+  client.onMessage(async (msg) => {
+    if (!msg.isGroupMsg) return;
+
+    const allowed = registeredGroups[userId];
+    if (!allowed?.has(msg.chatId)) return;
+
+    try {
+      await axios.post(`${BACKEND_BASE_URL}/wa/message-webhook/`, {
+        user_id: userId,
+        group_id: msg.chatId,
+        sender_name: msg.sender?.pushname || 'Unknown',
+        content: msg.body,
+        timestamp: msg.timestamp * 1000,
+        mediaType: msg.type,
+      });
+    } catch (err) {
+      if (err instanceof Error) {
+        console.error(`❌ Failed to POST group message [${userId}]:`, err.message);
+      } else {
+        console.error(`❌ Unknown error posting group message [${userId}]:`, err);
       }
-    });
-  } catch (error) {
-    io.to(userId).emit('error', 'Failed to start WhatsApp session');
-  }
+    }
+  });
+
+  return qrCodeData || '';
 }
