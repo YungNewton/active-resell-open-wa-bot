@@ -9,7 +9,7 @@ app.use(express.json());
 // Mount the routes
 app.use('/wa', createSessionRoutes());
 
-const PORT = 8000;
+const PORT = 8080;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
 });

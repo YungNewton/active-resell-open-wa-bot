@@ -31,18 +31,24 @@ export default function createSessionRoutes(): Router {
     if (!client) {
       return res.status(404).json({ error: 'Session not found' });
     }
-
+  
     try {
       const chats = await client.getAllChats();
-      const groups = chats
-        .filter((c) => c.isGroup)
-        .map((g) => ({ name: g.name, id: g.id }));
-      res.json({ groups });
+      const groups = chats.filter((c) => c.isGroup);
+  
+      const groupData = groups.map((g) => ({
+        name: g.name,
+        id: g.id,
+        icon: g.pic || null,
+      }));
+  
+      res.json({ groups: groupData });
     } catch (err) {
+      console.error('Group fetch failed:', err);
       res.status(500).json({ error: 'Failed to fetch groups' });
     }
-  });
-
+  });  
+  
   router.post('/register-message-hook', async (req, res) => {
     const { userId, registeredGroups: groups } = req.body;
     if (!userId || !Array.isArray(groups)) {
@@ -52,6 +58,38 @@ export default function createSessionRoutes(): Router {
     registeredGroups[userId] = new Set(groups);
     res.json({ detail: 'Registered group hooks.' });
   });
+
+  router.post('/cancel-session', async (req, res) => {
+    const { userId } = req.body;
+    if (!userId) {
+      return res.status(400).json({ error: 'Missing userId' });
+    }
+  
+    const client = clients[userId];
+    if (!client) {
+      return res.status(404).json({ error: 'No active session to cancel' });
+    }
+  
+    try {
+      const state = await client.getConnectionState(); // ✅ fixed method
+      const disallowedStates = ['CONNECTED', 'SYNCING'];
+  
+      if (disallowedStates.includes(state)) {
+        return res.status(400).json({ error: `Cannot cancel session in state: ${state}` });
+      }
+  
+      await client.logout();  // Optional: logout before kill
+      await client.kill();    // Kill browser + session
+      delete clients[userId];
+      delete registeredGroups[userId];
+  
+      return res.json({ detail: 'Session cancelled successfully.' });
+    } catch (err) {
+      console.error('Cancel error:', err);
+      return res.status(500).json({ error: 'Failed to cancel session' });
+    }
+  });
+  
 
   return router;
 }

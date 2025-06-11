@@ -8,19 +8,24 @@ import { registeredGroups } from '../utils/state';
 
 dotenv.config(); // Load .env
 
-const BACKEND_BASE_URL = process.env.BACKEND_BASE_URL || 'http://localhost:4000';
+const BACKEND_BASE_URL = process.env.BACKEND_BASE_URL || 'http://127.0.0.1:8000';
 export const clients: Record<string, Client> = {};
 
 // Global event listener — required once
 ev.on('**', async (data, sessionId, namespace) => {
   if (!sessionId) return;
+  if (namespace === 'qrData') {
+    if (typeof data !== 'string') {
+      console.error(`❌ QR data is not a string for ${sessionId}`, data);
+      return;
+    }
 
-  if (namespace === 'qr') {
-    console.log(`🟡 QR code ready for ${sessionId}`);
+    console.log(`🟡 QR string received for ${sessionId}`);
+
     try {
-      await axios.post(`${BACKEND_BASE_URL}/wa/qr-code/`, {
+      await axios.post(`${BACKEND_BASE_URL}/main/wa/qr-code/`, {
         user_id: sessionId,
-        qr_base64: data,
+        qr_string: data, // ✅ send raw QR string here
       });
     } catch (err) {
       if (err instanceof Error) {
@@ -107,7 +112,7 @@ export async function initClient(userId: string, forceDelete = false): Promise<s
     console.log(`🔁 [Client-level] State changed for ${userId}: ${state}`);
 
     try {
-      await axios.post(`${BACKEND_BASE_URL}/wa/session-status/`, {
+      await axios.post(`${BACKEND_BASE_URL}/main/wa/session-status/`, {
         user_id: userId,
         status: state,
       });
@@ -126,19 +131,29 @@ export async function initClient(userId: string, forceDelete = false): Promise<s
 
   client.onMessage(async (msg) => {
     if (!msg.isGroupMsg) return;
-
+  
     const allowed = registeredGroups[userId];
     if (!allowed?.has(msg.chatId)) return;
-
+  
+    // Only handle image messages
+    if (msg.type !== 'image') return;
+  
+    const base64Image = msg.body;
+    const caption = msg.caption || '';
+    const albumId = (msg as any).parentMsgKey?._serialized || null;
+  
     try {
-      await axios.post(`${BACKEND_BASE_URL}/wa/message-webhook/`, {
-        user_id: userId,
-        group_id: msg.chatId,
-        sender_name: msg.sender?.pushname || 'Unknown',
-        content: msg.body,
-        timestamp: msg.timestamp * 1000,
-        mediaType: msg.type,
-      });
+      await axios.post(
+        `${BACKEND_BASE_URL}/main/chat-groups/${encodeURIComponent(msg.chatId)}/messages/`,
+        {
+          sender_name: msg.sender?.pushname || 'Unknown',
+          content: caption,
+          image_base64: base64Image,
+          timestamp: msg.timestamp * 1000,
+          media_type: 'image',
+          album_parent_key: albumId, // New field sent to backend
+        }
+      );
     } catch (err) {
       if (err instanceof Error) {
         console.error(`❌ Failed to POST group message [${userId}]:`, err.message);
@@ -146,7 +161,7 @@ export async function initClient(userId: string, forceDelete = false): Promise<s
         console.error(`❌ Unknown error posting group message [${userId}]:`, err);
       }
     }
-  });
+  });  
 
   return qrCodeData || '';
 }
