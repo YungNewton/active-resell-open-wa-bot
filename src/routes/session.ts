@@ -1,6 +1,7 @@
 // === routes/session.ts ===
 import express, { Router } from 'express';
 import { initClient, getClientState, clients } from '../controllers/clientManager';
+import type { ChatId } from '@open-wa/wa-automate';
 import { registeredGroups } from '../utils/state';
 
 export default function createSessionRoutes(): Router {
@@ -62,6 +63,27 @@ export default function createSessionRoutes(): Router {
     }
   });
 
+  // Get profile picture of a group
+  router.get('/get-group-pic', async (req, res) => {
+    const { userId, groupId } = req.query;
+    if (!userId || !groupId) return res.status(400).json({ error: 'Missing userId or groupId' });
+
+    const clientPromise = clients[userId as string];
+    if (!clientPromise) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    try {
+      const client = await clientPromise;
+      const icon = await client.getProfilePicFromServer(groupId as ChatId).catch(() => null);
+
+      return res.json({ icon });
+    } catch (err) {
+      console.error(`Failed to fetch group pic for ${groupId}:`, err);
+      return res.status(500).json({ error: 'Failed to fetch group pic' });
+    }
+  });
+
   // Register group message hook
   router.post('/register-message-hook', async (req, res) => {
     const { userId, registeredGroups: groups } = req.body;
@@ -88,9 +110,9 @@ export default function createSessionRoutes(): Router {
       const state = await client.getConnectionState?.();
       const disallowedStates = ['CONNECTED', 'SYNCING'];
 
-      if (disallowedStates.includes(state)) {
-        return res.status(400).json({ error: `Cannot cancel session in state: ${state}` });
-      }
+      // if (disallowedStates.includes(state)) {
+      //   return res.status(400).json({ error: `Cannot cancel session in state: ${state}` });
+      // }
 
       await client.logout?.();
       await client.kill?.();

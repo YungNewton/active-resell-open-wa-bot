@@ -158,13 +158,17 @@ export async function initClient(userId: string, forceDelete = false): Promise<s
         folder: 'whatsapp_images',
       });
   
+      const senderPhone = msg.sender?.id?.split('@')[0] || null;
+      const senderName = msg.sender?.pushname || 'Unknown';
+  
       await axios.post(`${BACKEND_BASE_URL}/main/chat-groups/${encodeURIComponent(msg.chatId)}/messages/`, {
-        sender_name: msg.sender?.pushname || 'Unknown',
+        sender_name: senderName,
         content: caption,
         image_url: uploadRes.secure_url,
         timestamp: msg.timestamp * 1000,
         media_type: 'image',
         album_parent_key: albumId,
+        sender_wa_id: senderPhone,
       });
   
       await fs.remove(tempPath);
